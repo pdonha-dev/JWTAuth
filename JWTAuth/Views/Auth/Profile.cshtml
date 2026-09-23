@@ -1,0 +1,23 @@
+@model JWTAuth.Core.Models.AuthenticatedUser
+@{
+    Layout = "~/Views/Shared/_Layout.cshtml";
+    ViewData["Title"] = "Perfil";
+}
+
+<h2>Perfil</h2>
+<dl>
+    <dt>Identificador</dt>
+    <dd>@Model.UserId</dd>
+    <dt>Usuário</dt>
+    <dd>@Model.Username</dd>
+</dl>
+
+<p>O access token é curto. Use Renovar sessão após sua expiração.</p>
+<form asp-controller="Auth" asp-action="Refresh" method="post">
+    <input type="hidden" name="CsrfToken" value="@ViewBag.SessionCsrf" />
+    <button type="submit" class="btn btn-primary">Renovar sessão</button>
+</form>
+<form asp-controller="Auth" asp-action="Logout" method="post" class="mt-2">
+    <input type="hidden" name="CsrfToken" value="@ViewBag.SessionCsrf" />
+    <button type="submit" class="btn btn-danger">Sair</button>
+</form>

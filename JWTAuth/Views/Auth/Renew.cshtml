@@ -1,0 +1,16 @@
+@model JWTAuth.Models.SessionActionInput
+@{
+    Layout = "~/Views/Shared/_Layout.cshtml";
+    ViewData["Title"] = "Renovar sessão";
+}
+
+<h2>Renovar sessão</h2>
+<p>O access token pode estar expirado. A renovação autentica o refresh token no cookie seguro.</p>
+@if (ViewBag.StatusMessage is string statusMessage)
+{
+    <div class="alert alert-warning" role="alert">@statusMessage</div>
+}
+<form asp-controller="Auth" asp-action="Refresh" method="post">
+    <input asp-for="CsrfToken" type="hidden" />
+    <button type="submit" class="btn btn-primary">Renovar</button>
+</form>

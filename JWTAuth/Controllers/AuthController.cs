@@ -1,250 +1,180 @@
-﻿using JWTAuth.Core.Interfaces;
-using JWTAuth.Core.Services.Jwt;
-using JWTAuth.Core.Services.Jwt.Models;
+using System.Security.Claims;
+using JWTAuth.Authentication;
+using JWTAuth.Core.Interfaces;
+using JWTAuth.Core.Models;
 using JWTAuth.Models;
-using Microsoft.AspNetCore.Authentication.Cookies;
-using Microsoft.AspNetCore.Authentication;
+using JWTAuth.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.AspNetCore.RateLimiting;
 
-namespace JWTAuth.Controllers
+namespace JWTAuth.Controllers;
+
+[ResponseCache(Location = ResponseCacheLocation.None, NoStore = true)]
+public sealed class AuthController : Controller
 {
-    public class AuthController : Controller
+    private readonly IAuthService _authService;
+    private readonly IJwtTokenService _jwtTokenService;
+    private readonly IRefreshSessionStore _sessionStore;
+    private readonly SessionCsrfService _csrfService;
+    private readonly ILogger<AuthController> _logger;
+
+    public AuthController(IAuthService authService, IJwtTokenService jwtTokenService, IRefreshSessionStore sessionStore, SessionCsrfService csrfService, ILogger<AuthController> logger)
     {
-        private readonly SigningConfigurations _signingConfigurations;
-        private readonly TokenConfigurations _tokenConfigurations;
-        private readonly ITokenService _tokenService;
-        private readonly IGenericRepository<Entities.User, Models.User> _userRepository;
-        private readonly IPasswordHasher _passwordHasher;
-        private readonly ILogger<AuthController> _logger;
-        private readonly IDistributedCache _cache;
+        _authService = authService;
+        _jwtTokenService = jwtTokenService;
+        _sessionStore = sessionStore;
+        _csrfService = csrfService;
+        _logger = logger;
+    }
 
-        public AuthController(
-            SigningConfigurations signingConfigurations,
-            TokenConfigurations tokenConfigurations,
-            IGenericRepository<Entities.User, Models.User> userRepository,
-            IPasswordHasher passwordHasher,
-            ITokenService tokenService,
-            ILogger<AuthController> logger,
-            IDistributedCache cache)
+    [HttpGet, AllowAnonymous]
+    public IActionResult Login(string? logout = null)
+    {
+        ViewBag.StatusMessage = logout switch
         {
-            _signingConfigurations = signingConfigurations;
-            _tokenConfigurations = tokenConfigurations;
-            _tokenService = tokenService;
-            _userRepository = userRepository;
-            _passwordHasher = passwordHasher;
-            _logger = logger;
-            _cache  = cache;
+            "revoked" => "Sessão encerrada e refresh token revogado.",
+            "local-only" => "Cookies removidos, mas não foi possível confirmar a revogação no Redis.",
+            _ => null
+        };
+        return View(new Login());
+    }
+
+    [HttpPost, AllowAnonymous, EnableRateLimiting("login")]
+    public async Task<IActionResult> Login(Login input, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return View(input);
+        AuthenticatedUser? user = await _authService.ValidateCredentialsAsync(input.Username, input.Password, cancellationToken);
+        if (user is null)
+        {
+            ModelState.AddModelError(string.Empty, "Usuário ou senha inválidos.");
+            return View(input);
         }
 
-        [HttpGet]
-        public IActionResult Login()
+        try
         {
-            return View();
+            RefreshSession session = await _sessionStore.CreateAsync(user.UserId, cancellationToken);
+            WriteSessionCookies(_jwtTokenService.Create(user, session.SessionId), session, _csrfService.CreateToken());
+            return RedirectToAction(nameof(Profile));
         }
-
-        [HttpPost]
-        [AllowAnonymous]
-        public async Task<IActionResult> Login(Login credentials)
+        catch (SessionStoreUnavailableException exception)
         {
-            try
-            {
-                var userModel = _userRepository.FindBy(c => c.Username.ToLower() == credentials.Username.ToLower()).FirstOrDefault();
-
-                if (userModel == null || !_passwordHasher.VerifyPassword(userModel.Password, credentials.Password))
-                {
-                    ViewBag.ErrorMessage = "Usuario ou senha inválidos";
-                    return View();
-                }
-
-                var userEntity = new Entities.User
-                {
-                    UserId = userModel.UserId,
-                    Username = userModel.Username
-                };
-
-                var token = _tokenService.GenerateToken(userEntity, _tokenConfigurations, _signingConfigurations, _cache);
-
-                Response.Cookies.Append("AccessToken", token.accessToken, new CookieOptions
-                {
-                    HttpOnly = true,
-                    SameSite = SameSiteMode.Strict,
-                    Expires = DateTime.UtcNow.AddSeconds(_tokenConfigurations.Seconds)
-                });
-
-                return RedirectToAction("Index", "Home");
-            }
-            catch (Exception ex) 
-            {
-                _logger.LogError(ex, "Erro ao autenticar o usuário");
-                ViewBag.ErrorMessage = "Erro interno no servidor";
-                return View();
-            }
-
-        }
-
-        [HttpGet]
-        [AllowAnonymous]
-        public IActionResult Register()
-        {
-            return View(); 
-        }
-
-        [HttpPost]
-        [AllowAnonymous]
-        public async Task<IActionResult> Register(RegisterUser userModel)
-        {
-            try
-            {
-                var existingUser = _userRepository.FindBy(c => c.Username.ToLower() == userModel.Username.ToLower()).FirstOrDefault();
-                if (existingUser != null)
-                {
-                    if (existingUser != null)
-                    {
-                        ViewBag.ErrorMessage = "Nome de usuário já existe";
-                        return View();
-                    }
-                }
-
-                string hashedPassword = _passwordHasher.HashPassword(userModel.Password);
-
-                var newUser = new User
-                {
-                    Username = userModel.Username,
-                    Password = hashedPassword
-                };
-
-                _userRepository.Add(newUser);
-
-                return RedirectToAction("Login");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro ao registrar usuário");
-                ViewBag.ErrorMessage = "Erro interno no servidor";
-                return View();
-            }
-        }
-
-        //[HttpPost]
-        //[Authorize]
-        //public async Task<IActionResult> RefreshToken(RefreshToken model)
-        //{
-        //    var userIdClaim = User.FindFirst("UserId")?.Value;
-
-        //    if (string.IsNullOrEmpty(userIdClaim))
-        //    {
-        //        return Unauthorized(new ApiResponse<dynamic>
-        //        {
-        //            Success = false,
-        //            Message = "Token inválido",
-        //            Data = null
-        //        });
-        //    }
-
-        //    var userId = long.Parse(userIdClaim);
-        //    var user = _userRepository.FindBy(c => c.UserId == userId).FirstOrDefault();
-
-        //    if (user == null)
-        //    {
-        //        return NotFound(new ApiResponse<dynamic>
-        //        {
-        //            Success = false,
-        //            Message = "Usuário não encontrado",
-        //            Data = null
-        //        });
-        //    }
-
-        //    var userEntity = new Entities.User
-        //    {
-        //        UserId = user.UserId,
-        //        Username = user.Username
-        //    };
-
-        //    var refreshedToken = await _tokenService.RefreshTokenAsync(userEntity, _tokenConfigurations, _signingConfigurations, _cache, model.refreshToken);
-
-        //    if (refreshedToken == null)
-        //    {
-        //        await RemoveRefreshToken(model.refreshToken);
-        //        return Unauthorized(new ApiResponse<dynamic>
-        //        {
-        //            Success = false,
-        //            Message = "Refresh token inválido ou expirado",
-        //            Data = null
-        //        });
-        //    }
-
-        //    return Ok(refreshedToken);
-        //}
-
-
-        [HttpGet]
-        [Authorize]
-        public IActionResult Profile()
-        {
-            try
-            {
-                var userIdClaim = User.FindFirst("UserId")?.Value;
-
-                if (string.IsNullOrEmpty(userIdClaim))
-                {
-                    return RedirectToAction("Login");
-                }
-
-                var userId = long.Parse(userIdClaim);
-                var user = _userRepository.FindBy(c => c.UserId == userId).FirstOrDefault();
-
-                if (user == null)
-                {
-                    return RedirectToAction("Login");
-                }
-
-                user.Password = "";
-
-                return View(user);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro ao recuperar perfil do usuário");
-                ViewBag.ErrorMessage = "Erro interno no servidor";
-                return RedirectToAction("Login");
-            }
-        }
-
-        [HttpPost]
-        [Authorize]
-        public async Task<IActionResult> Logout([FromServices] IDistributedCache cache)
-        {
-            try
-            {
-                var userIdClaim = User.FindFirst("UserId")?.Value;
-
-                if (string.IsNullOrEmpty(userIdClaim))
-                {
-                    _logger.LogWarning("Erro ao encontrar UserId");
-                }
-
-                var userId = long.Parse(userIdClaim);
-
-                Response.Cookies.Delete("AccessToken");
-
-                await cache.RemoveAsync($"refreshToken:{userId}");
-
-                await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-
-                return RedirectToAction("Login");
-            }   
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Erro ao fazer logout");
-                return RedirectToAction("Login");
-            }
-        }
-
-        public IActionResult AccessDenied()
-        {
-            return RedirectToAction("Login");
+            _logger.LogError(exception, "Session creation failed because Redis is unavailable");
+            ModelState.AddModelError(string.Empty, "Não foi possível iniciar a sessão. Tente novamente.");
+            return View(input);
         }
     }
+
+    [HttpGet, AllowAnonymous]
+    public IActionResult Register() => View(new RegisterUser());
+
+    [HttpPost, AllowAnonymous, EnableRateLimiting("register")]
+    public async Task<IActionResult> Register(RegisterUser input, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid) return View(input);
+        RegisterResult result = await _authService.RegisterAsync(input.Username, input.Password, cancellationToken);
+        if (result == RegisterResult.Success) return RedirectToAction(nameof(Login));
+        ModelState.AddModelError(string.Empty, result switch
+        {
+            RegisterResult.DuplicateUsername => "Nome de usuário indisponível.",
+            RegisterResult.InvalidPassword => "A senha deve ter entre 12 caracteres e 72 bytes em UTF-8.",
+            _ => "Nome de usuário inválido."
+        });
+        return View(input);
+    }
+
+    [HttpGet, Authorize]
+    public async Task<IActionResult> Profile(CancellationToken cancellationToken)
+    {
+        if (!long.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out long userId)) return Challenge();
+        AuthenticatedUser? user = await _authService.FindByIdAsync(userId, cancellationToken);
+        if (user is null) return Challenge();
+        ViewBag.SessionCsrf = Request.Cookies[SessionCookieNames.CsrfToken];
+        return View(user);
+    }
+
+    [HttpGet, AllowAnonymous]
+    public IActionResult Renew()
+    {
+        string? csrfToken = Request.Cookies[SessionCookieNames.CsrfToken];
+        if (string.IsNullOrEmpty(csrfToken) || !Request.Cookies.ContainsKey(SessionCookieNames.RefreshToken)) return RedirectToAction(nameof(Login));
+        return View(new SessionActionInput { CsrfToken = csrfToken });
+    }
+
+    [HttpPost, AllowAnonymous, IgnoreAntiforgeryToken, EnableRateLimiting("refresh")]
+    public async Task<IActionResult> Refresh(SessionActionInput input, CancellationToken cancellationToken)
+    {
+        if (!IsValidSessionCsrf(input) || !Request.Cookies.TryGetValue(SessionCookieNames.RefreshToken, out string? refreshToken))
+        {
+            ClearSessionCookies();
+            return Unauthorized();
+        }
+        RefreshRotationResult rotation = await _sessionStore.RotateAsync(refreshToken, cancellationToken);
+        if (rotation.Status == RefreshRotationStatus.Unavailable)
+        {
+            ViewBag.StatusMessage = "O serviço de sessão está temporariamente indisponível. Tente novamente.";
+            Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return View("Renew", input);
+        }
+        if (rotation.Status != RefreshRotationStatus.Success || rotation.Session is null)
+        {
+            ClearSessionCookies();
+            return RedirectToAction(nameof(Login));
+        }
+        AuthenticatedUser? user = await _authService.FindByIdAsync(rotation.Session.UserId, cancellationToken);
+        if (user is null)
+        {
+            await _sessionStore.RevokeAsync(rotation.Session.RefreshToken, cancellationToken);
+            ClearSessionCookies();
+            return RedirectToAction(nameof(Login));
+        }
+        WriteSessionCookies(_jwtTokenService.Create(user, rotation.Session.SessionId), rotation.Session, input.CsrfToken);
+        return RedirectToAction(nameof(Profile));
+    }
+
+    [HttpPost, AllowAnonymous, IgnoreAntiforgeryToken]
+    public async Task<IActionResult> Logout(SessionActionInput input, CancellationToken cancellationToken)
+    {
+        if (!IsValidSessionCsrf(input) || !Request.Cookies.TryGetValue(SessionCookieNames.RefreshToken, out string? refreshToken))
+        {
+            ClearSessionCookies();
+            return RedirectToAction(nameof(Login));
+        }
+        RefreshRevokeResult revokeResult = await _sessionStore.RevokeAsync(refreshToken, cancellationToken);
+        ClearSessionCookies();
+        string result = revokeResult.Status is RefreshRevokeStatus.Revoked
+            or RefreshRevokeStatus.AlreadyRevoked
+            or RefreshRevokeStatus.Expired
+                ? "revoked"
+                : "local-only";
+        return RedirectToAction(nameof(Login), new { logout = result });
+    }
+
+    private bool IsValidSessionCsrf(SessionActionInput input) => _csrfService.IsValid(Request.Cookies[SessionCookieNames.CsrfToken], input.CsrfToken);
+
+    private void WriteSessionCookies(AccessTokenResult accessToken, RefreshSession session, string csrfToken)
+    {
+        Response.Cookies.Append(SessionCookieNames.AccessToken, accessToken.Value, BuildCookieOptions("/", accessToken.ExpiresAt));
+        Response.Cookies.Append(SessionCookieNames.RefreshToken, session.RefreshToken, BuildCookieOptions("/Auth", session.AbsoluteExpiresAt));
+        Response.Cookies.Append(SessionCookieNames.CsrfToken, csrfToken, BuildCookieOptions("/Auth", session.AbsoluteExpiresAt));
+    }
+
+    private static CookieOptions BuildCookieOptions(string path, DateTimeOffset expiresAt) => new()
+    {
+        HttpOnly = true,
+        Secure = true,
+        SameSite = SameSiteMode.Strict,
+        Path = path,
+        Expires = expiresAt,
+        IsEssential = true
+    };
+
+    private void ClearSessionCookies()
+    {
+        Response.Cookies.Delete(SessionCookieNames.AccessToken, BuildDeleteOptions("/"));
+        Response.Cookies.Delete(SessionCookieNames.RefreshToken, BuildDeleteOptions("/Auth"));
+        Response.Cookies.Delete(SessionCookieNames.CsrfToken, BuildDeleteOptions("/Auth"));
+    }
+
+    private static CookieOptions BuildDeleteOptions(string path) => new() { Secure = true, SameSite = SameSiteMode.Strict, Path = path };
 }

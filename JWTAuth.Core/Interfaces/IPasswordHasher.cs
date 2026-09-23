@@ -1,11 +1,8 @@
-﻿using System.Linq.Expressions;
+namespace JWTAuth.Core.Interfaces;
 
-namespace JWTAuth.Core.Interfaces
+public interface IPasswordHasher
 {
-    public interface IPasswordHasher
-    {
-        string HashPassword(string password);
-        bool VerifyPassword(string storedHash, string password);
-    }
-
+    bool IsSupported(string password);
+    string HashPassword(string password);
+    bool VerifyPassword(string storedHash, string password);
 }

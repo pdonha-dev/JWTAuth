@@ -1,6 +1,6 @@
 using JWTAuth.Db.Context;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -38,6 +38,27 @@ public partial class AddNormalizedUsername : Migration
             nullable: true);
 
         migrationBuilder.Sql("UPDATE \"User\" SET \"NormalizedUsername\" = UPPER(BTRIM(\"Username\"));");
+
+        migrationBuilder.Sql(
+            """
+            DO $$
+            DECLARE
+                collisions text;
+            BEGIN
+                SELECT string_agg(normalized_username, ', ' ORDER BY normalized_username)
+                INTO collisions
+                FROM (
+                    SELECT "NormalizedUsername" AS normalized_username
+                    FROM "User"
+                    GROUP BY "NormalizedUsername"
+                    HAVING COUNT(*) > 1
+                ) duplicate_usernames;
+
+                IF collisions IS NOT NULL THEN
+                    RAISE EXCEPTION 'Normalized username collisions must be resolved before migration: %', collisions;
+                END IF;
+            END $$;
+            """);
 
         migrationBuilder.AlterColumn<string>(
             name: "NormalizedUsername",

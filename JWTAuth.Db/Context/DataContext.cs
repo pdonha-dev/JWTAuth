@@ -1,4 +1,4 @@
-﻿using JWTAuth.Entities;
+using JWTAuth.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace JWTAuth.Db.Context

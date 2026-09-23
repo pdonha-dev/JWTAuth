@@ -1,4 +1,4 @@
-﻿namespace JWTAuth.Entities
+namespace JWTAuth.Entities
 {
     public class User
     {

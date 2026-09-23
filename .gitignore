@@ -364,3 +364,9 @@ FodyWeavers.xsd
 
 # Graphify generated output
 graphify-out/
+
+# Local secrets and development certificates
+.env
+.env.*
+!.env.example
+.https/
